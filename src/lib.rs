@@ -5,6 +5,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 
 type Args = syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>;
+type Call = syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>;
 
 #[proc_macro_attribute]
 pub fn lapack(_attr: TokenStream, func: TokenStream) -> TokenStream {
@@ -14,16 +15,9 @@ pub fn lapack(_attr: TokenStream, func: TokenStream) -> TokenStream {
 // TokenStream2-based main routine
 fn lapack2(func: TokenStream2) -> TokenStream2 {
     let f: syn::ForeignItemFn = syn::parse2(func).unwrap();
-    for input in &f.sig.inputs {
-        match input {
-            syn::FnArg::Typed(pat) => {
-                dbg!(&pat.pat);
-                dbg!(&pat.ty);
-            }
-            _ => panic!(),
-        }
-    }
-    quote::quote! { #f }
+    let _input = signature_input(&f.sig.inputs);
+    let _call = call(&f.sig.inputs);
+    quote! { #f }
 }
 
 /// Parse type ascription pattern `a: *mut f64` into ("a", "f64")
@@ -54,7 +48,8 @@ fn parse_input(pat: &syn::PatType) -> (String, String) {
 }
 
 /// Convert pointer-based raw-LAPACK API into value and reference based API
-fn signature_input(mut args: Args) -> Args {
+fn signature_input(args: &Args) -> Args {
+    let mut args = args.clone();
     for arg in &mut args {
         match arg {
             syn::FnArg::Typed(arg) => {
@@ -73,6 +68,23 @@ fn signature_input(mut args: Args) -> Args {
         }
     }
     args
+}
+
+fn call(args: &Args) -> Call {
+    args.iter()
+        .map(|arg| match arg {
+            syn::FnArg::Typed(arg) => {
+                let (name, _ty) = parse_input(arg);
+                let expr = match name.to_lowercase().as_str() {
+                    "info" => "info".into(),
+                    "a" | "b" | "ipiv" => format!("{}.as_mut_ptr()", name),
+                    _ => format!("&{}", name),
+                };
+                syn::parse_str::<syn::Expr>(&expr).unwrap()
+            }
+            _ => unreachable!(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -95,7 +107,7 @@ mod tests {
         );
         "#;
         let f: syn::ForeignItemFn = syn::parse_str(dgetrs).unwrap();
-        let result = super::signature_input(f.sig.inputs);
+        let result = super::signature_input(&f.sig.inputs);
         let result_str = quote! { #result }.to_string();
         let answer: TokenStream2 = syn::parse_str(
             r#"
@@ -108,6 +120,41 @@ mod tests {
             B: &mut [f64],
             ldb: i32,
             info: &mut i32,
+            "#,
+        )
+        .unwrap();
+        assert_eq!(result_str, answer.to_string());
+    }
+
+    #[test]
+    fn call() {
+        let dgetrs = r#"
+        pub fn dgetrs_(
+            trans: *const c_char,
+            n: *const c_int,
+            nrhs: *const c_int,
+            A: *const f64,
+            lda: *const c_int,
+            ipiv: *const c_int,
+            B: *mut f64,
+            ldb: *const c_int,
+            info: *mut c_int,
+        );
+        "#;
+        let f: syn::ForeignItemFn = syn::parse_str(dgetrs).unwrap();
+        let result = super::call(&f.sig.inputs);
+        let result_str = quote! { #result }.to_string();
+        let answer: TokenStream2 = syn::parse_str(
+            r#"
+            &(trans as c_char),
+            &n,
+            &nrhs,
+            a.as_ptr(),
+            &lda,
+            ipiv.as_ptr(),
+            b.as_mut_ptr(),
+            &ldb,
+            info,
             "#,
         )
         .unwrap();
