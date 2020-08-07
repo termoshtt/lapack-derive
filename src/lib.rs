@@ -20,31 +20,57 @@ fn lapack2(func: TokenStream2) -> TokenStream2 {
     quote! { #f }
 }
 
-/// Parse type ascription pattern `a: *mut f64` into ("a", "f64")
-fn parse_input(pat: &syn::PatType) -> (String, String) {
-    let name = match &*pat.pat {
-        syn::Pat::Ident(ident) => ident.ident.to_string(),
-        _ => unreachable!(),
-    };
-    let ty = match &*pat.ty {
-        syn::Type::Ptr(ptr_ty) => match &*ptr_ty.elem {
+/// Pointer type `*const T` or `*mut T`
+enum Ptr {
+    Constant(String),
+    Mutable(String),
+}
+
+impl Ptr {
+    /// Get `T` as String
+    fn ty(&self) -> String {
+        match self {
+            Ptr::Constant(ty) => ty.clone(),
+            Ptr::Mutable(ty) => ty.clone(),
+        }
+    }
+}
+
+impl From<syn::TypePtr> for Ptr {
+    fn from(ptr_ty: syn::TypePtr) -> Self {
+        match &*ptr_ty.elem {
             syn::Type::Path(path) => {
                 if let Some(id) = path.path.get_ident() {
-                    id.to_string()
+                    let id = id.to_string();
+                    let id = match id.as_str() {
+                        "c_char" => "u8",
+                        "c_int" => "i32",
+                        id => id,
+                    };
+                    match ptr_ty.mutability {
+                        Some(_) => Ptr::Mutable(id.to_string()),
+                        None => Ptr::Constant(id.to_string()),
+                    }
                 } else {
                     unreachable!()
                 }
             }
             _ => unreachable!(),
-        },
+        }
+    }
+}
+
+/// Parse type ascription pattern `a: *mut f64` into ("a", "f64")
+fn parse_input(pat: &syn::PatType) -> (String, Ptr) {
+    let name = match &*pat.pat {
+        syn::Pat::Ident(ident) => ident.ident.to_string(),
+        _ => unreachable!(),
+    };
+    let ptr = match &*pat.ty {
+        syn::Type::Ptr(ptr_ty) => ptr_ty.clone().into(),
         _ => unreachable!("LAPACK raw API must be consists of pointer arguments"),
     };
-    let ty = match ty.as_str() {
-        "c_char" => "u8",
-        "c_int" => "i32",
-        ty => ty,
-    };
-    (name, ty.into())
+    (name, ptr)
 }
 
 /// Convert pointer-based raw-LAPACK API into value and reference based API
@@ -53,14 +79,17 @@ fn signature_input(args: &Args) -> Args {
     for arg in &mut args {
         match arg {
             syn::FnArg::Typed(arg) => {
-                let (name, ty) = parse_input(arg);
+                let (name, ptr) = parse_input(arg);
                 let new_type = match name.to_lowercase().as_str() {
                     // pointer -> mutable reference
                     "info" => "&mut i32".into(),
                     // pointer -> array
-                    "a" | "b" | "ipiv" => format!("&mut [{}]", ty),
+                    "a" | "b" | "ipiv" => match ptr {
+                        Ptr::Constant(ty) => format!("&[{}]", ty),
+                        Ptr::Mutable(ty) => format!("&mut [{}]", ty),
+                    },
                     // pointer -> value
-                    _ => ty.into(),
+                    _ => ptr.ty(),
                 };
                 *arg.ty = syn::parse_str(&new_type).unwrap();
             }
@@ -74,11 +103,17 @@ fn call(args: &Args) -> Call {
     args.iter()
         .map(|arg| match arg {
             syn::FnArg::Typed(arg) => {
-                let (name, _ty) = parse_input(arg);
+                let (name, ptr) = parse_input(arg);
                 let expr = match name.to_lowercase().as_str() {
                     "info" => "info".into(),
-                    "a" | "b" | "ipiv" => format!("{}.as_mut_ptr()", name),
-                    _ => format!("&{}", name),
+                    "a" | "b" | "ipiv" => match ptr {
+                        Ptr::Constant(_) => format!("{}.as_ptr()", name),
+                        Ptr::Mutable(_) => format!("{}.as_mut_ptr()", name),
+                    },
+                    _ => match ptr.ty().as_str() {
+                        "u8" => format!("&({} as c_char)", name),
+                        _ => format!("&{}", name),
+                    },
                 };
                 syn::parse_str::<syn::Expr>(&expr).unwrap()
             }
@@ -114,9 +149,9 @@ mod tests {
             trans: u8,
             n: i32,
             nrhs: i32,
-            A: &mut [f64],
+            A: &[f64],
             lda: i32,
-            ipiv: &mut [i32],
+            ipiv: &[i32],
             B: &mut [f64],
             ldb: i32,
             info: &mut i32,
@@ -149,12 +184,12 @@ mod tests {
             &(trans as c_char),
             &n,
             &nrhs,
-            a.as_ptr(),
+            A.as_ptr(),
             &lda,
             ipiv.as_ptr(),
-            b.as_mut_ptr(),
+            B.as_mut_ptr(),
             &ldb,
-            info,
+            info
             "#,
         )
         .unwrap();
