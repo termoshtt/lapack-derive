@@ -1,7 +1,7 @@
 #![recursion_limit = "128"]
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 
 type Args = syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>;
@@ -15,9 +15,21 @@ pub fn lapack(_attr: TokenStream, func: TokenStream) -> TokenStream {
 // TokenStream2-based main routine
 fn lapack2(func: TokenStream2) -> TokenStream2 {
     let f: syn::ForeignItemFn = syn::parse2(func).unwrap();
-    let _input = signature_input(&f.sig.inputs);
-    let _call = call(&f.sig.inputs);
-    quote! { #f }
+    // like dgetrs_
+    let lapack_sys_name = &f.sig.ident;
+    // like dgetrs
+    let lapack_name = lapack_sys_name
+        .to_string()
+        .trim_end_matches('_')
+        .to_string();
+    let lapack_name = syn::Ident::new(&lapack_name, Span::call_site());
+    let input = signature_input(&f.sig.inputs);
+    let call = call(&f.sig.inputs);
+    quote! {
+        pub unsafe fn #lapack_name ( #input ) {
+            #lapack_sys_name ( #call )
+        }
+    }
 }
 
 /// Pointer type `*const T` or `*mut T`
@@ -217,23 +229,23 @@ mod tests {
             trans: u8,
             n: i32,
             nrhs: i32,
-            a: &[f64],
+            A: &[f64],
             lda: i32,
             ipiv: &[i32],
-            b: &mut [f64],
+            B: &mut [f64],
             ldb: i32,
-            info: &mut i32
+            info: &mut i32,
         ) {
             dgetrs_(
                 &(trans as c_char),
                 &n,
                 &nrhs,
-                a.as_ptr(),
+                A.as_ptr(),
                 &lda,
                 ipiv.as_ptr(),
-                b.as_mut_ptr(),
+                B.as_mut_ptr(),
                 &ldb,
-                info,
+                info
             )
         }
         "#;
